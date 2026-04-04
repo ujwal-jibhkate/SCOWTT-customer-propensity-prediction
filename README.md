@@ -218,8 +218,7 @@ SCOWTT/
 
 ## Use of AI Tools
 
-AI tools (Claude) were used for:
-- Guided learning and conceptual understanding of the data science pipeline
+AI tools were used for:
 - Debugging code and resolving library-specific issues
 - Documentation and reporting assistance
 
