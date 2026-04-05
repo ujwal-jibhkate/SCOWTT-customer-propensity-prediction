@@ -1,19 +1,29 @@
 # Predicting Customer Purchase Propensity & Order Value
 
-## Overview
+## Two Interpretations of One Problem
 
-This project models customer purchasing behavior on the Olist Brazilian E-Commerce platform using historical transactional data. The goal is to score each customer for:
+The assessment asks: *"Predict a user's propensity to place an order and their expected order value."* This can be interpreted two ways:
 
-1. **Purchase Propensity** : the probability (0–1) that a customer will place an order in the next 90 days.
-2. **Predicted Order Value** : the expected monetary value of that order.
+**Interpretation 1 — Snapshot-based propensity:** Given everything we know about a customer's history up to a point in time, will they purchase in the next 90 days? This is a time-windowed prediction — realistic for production ad targeting where you score customers monthly.
 
-These two scores are combined into an **Expected Value** metric (propensity × predicted value) to rank customers for targeted advertising.
+**Interpretation 2 — Loyalty prediction:** Given a customer's very first purchase, will they ever come back? This reframes the problem as identifying repeat buyers at the moment of acquisition — critical for customer lifetime value estimation.
+
+Both interpretations are valid and complementary. I implemented both as separate pipelines:
+
+| Aspect | Approach 1: Propensity | Approach 2: Loyalty |
+|---|---|---|
+| Question | Will they buy in the next 90 days? | Will they ever return? |
+| Features | Full purchase history (all orders) | First order only |
+| Target | Ordered after cutoff? (binary) | More than 1 lifetime order? (binary) |
+| Positive rate | 0.35% (293 users) | 3.12% (2,997 users) |
+| Use case | Short-term campaign targeting | Lifetime value identification |
+| Value target | Avg order value in target window | Avg future order value (excl. first) |
 
 ---
 
 ## Dataset
 
-The dataset contains ~100K orders from 2016–2018 across 11 CSV files.
+The [Brazilian E-Commerce Public Dataset by Olist](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce) contains ~100K orders from 2016–2018 across 11 CSV files.
 
 **Tables used (7):**
 
@@ -25,124 +35,175 @@ The dataset contains ~100K orders from 2016–2018 across 11 CSV files.
 | `olist_order_payments_dataset` | 103,886 | Payment method, installments, value |
 | `olist_order_reviews_dataset` | 99,224 | Review scores and text |
 | `olist_products_dataset` | 32,951 | Product category and attributes |
-| `product_category_name_translation` | 71 | Portuguese → English category mapping |
+| `product_category_name_translation` | 71 | Portuguese to English category mapping |
 
-**Tables excluded (4):** Geolocation (redundant with customer city/state), sellers (low signal for customer behavior), closed deals and marketing leads (B2B seller acquisition funnel, not customer-facing).
+**Tables excluded (4):** Geolocation (redundant with customer city/state), sellers (low signal), closed deals and marketing leads (B2B seller acquisition funnel, not customer-facing).
 
 ---
 
-## Methodology
+## Pipeline Architecture
+
+```
+01_data_exploration.ipynb        → Schema, quality checks, profiling reports
+
+02A_feature_engineering.ipynb    → Approach 1: Temporal features (history-based)
+03A_modelling.ipynb              → Approach 1: EDA + model training + evaluation
+04A_inference.ipynb              → Approach 1: Score all customers
+
+02B_feature_engineering.ipynb    → Approach 2: First-order features (loyalty-based)
+03B_modelling_loyalty.ipynb      → Approach 2: Model training + evaluation
+04B_inference_loyalty.ipynb      → Approach 2: Score all customers
+```
+
+---
+
+## Approach 1: Snapshot-Based Propensity
 
 ### Temporal Split
 
-To prevent data leakage, the dataset is split temporally:
+- **Feature window:** 2016-09-04 to 2018-07-01 (22 months of history)
+- **Target window:** 2018-07-01 to 2018-10-01 (90 days)
+- A 30-day window was initially tested but yielded only 9 qualifying orders (all canceled). The 90-day window provides 293 repeat customers.
 
-- **Feature window:** 2016-09-04 to 2018-07-01 (22 months), used to compute customer-level features
-- **Target window:** 2018-07-01 to 2018-10-01 (90 days), used to define labels
+### Feature Engineering (33 features across 6 groups)
 
-A 30-day target window was initially tested but yielded insufficient positive examples (all 9 qualifying orders were canceled). The 90-day window provides 298 repeat customers out of 83,748 total (0.35% positive rate).
-
-### Feature Engineering
-
-33 features were engineered across 6 groups, aggregated at the `customer_unique_id` level:
-
-| Group | Features | Description |
+| Group | Count | Description |
 |---|---|---|
 | Order count & status | 10 | Total orders + count pivoted by each order status |
-| Monetary & payment | 7 | Total spend, installments, payment value split by type (credit card, boleto, voucher, debit) |
-| Item & product | 7 | Product count, seller diversity, order size, price, freight |
-| Review engagement | 4 | Review count, average score, title length, body length |
+| Monetary & payment | 7 | Total spend, installments, value split by payment type |
+| Item & product | 7 | Product count, seller diversity, price, freight |
+| Review engagement | 4 | Review count, score, title length, body length |
 | Recency | 4 | Days since last purchase, shipment, delivery, review |
 | Preferences | 2 | Preferred product category, preferred payment method |
 
-After pairwise correlation analysis (threshold |r| > 0.7), 7 redundant features were removed. Categorical features were one-hot encoded (top-10 product categories + other), resulting in **40 model-ready features**.
+After correlation filtering (|r| > 0.7), 7 features removed. Categoricals one-hot encoded → **40 model-ready features**.
 
-Full feature documentation is available in [`data_reports/Feature_Engineering.xlsx`](data_reports/Feature_Engineering.xlsx).
+Full documentation: [`data_reports/Feature_Engineering.xlsx`](data_reports/Feature_Engineering.xlsx)
 
-### Null Handling
+### Classification Results
 
-| Feature(s) | Nulls | Strategy | Rationale |
-|---|---|---|---|
-| Payment columns | 1 each | Fill 0 | No payment record = no payment through that channel |
-| avg_order_price, avg_order_freight | 620 | Fill median | Real customers with missing item data; median robust to skew |
-| days_since_last_shipped | 1,473 | Fill column max | Never shipped = longest time; tree models interpret correctly |
-| days_since_last_delivered | 2,482 | Fill column max | Same logic; delivery is downstream of shipping |
-| days_since_last_review | 651 | Fill column max | No review = least engaged |
+| Model | ROC-AUC | PR-AUC |
+|---|---|---|
+| Logistic Regression | 0.5995 | 0.0061 |
+| Random Forest | 0.6040 | 0.0063 |
+| XGBoost | 0.5970 | 0.0066 |
+| **Balanced Random Forest** | **0.6171** | **0.0077** |
+| LightGBM | 0.6044 | 0.0073 |
+
+![Approach 1 PR and ROC Curves](outputs/pr_roc_curves.png)
+
+![Approach 1 Model Comparison](outputs/model_comparison.png)
+
+### Regression Results (Order Value)
+
+| Model | MAE | RMSE |
+|---|---|---|
+| Ridge | $60.24 | $94.38 |
+| **Random Forest** | **$55.75** | **$91.80** |
+| XGBoost | $55.78 | $92.14 |
+
+![Approach 1 Regression](outputs/regression_pred_vs_actual.png)
+
+### Top Features (Balanced Random Forest)
+
+![Approach 1 Feature Importance](outputs/feature_importance.png)
+
+Recency dominates — `days_since_last_delivered` and `days_since_last_purchase` are #1 and #2. Payment value and freight follow. This aligns with established RFM (Recency, Frequency, Monetary) frameworks.
+
+### Why Performance Is Limited
+
+Five different model architectures converge to similar PR-AUC (~0.006–0.008), confirming the signal ceiling is in the data, not the model. With 97% of customers having exactly one order, their feature profiles are nearly identical regardless of whether they return. Only 293 positive examples in a 90-day window provides insufficient signal for discrimination.
 
 ---
 
-## Modeling
+## Approach 2: Loyalty Prediction
 
-A two-stage framework was used: classification for purchase propensity, then regression for order value.
+### Problem Reframing
 
-### Stage 1: Purchase Propensity (Classification)
+Instead of predicting within a time window, we ask: **at the moment of first purchase, can we identify who will become a repeat buyer?** This gives us 2,997 positive examples (3.12%) — 10x more signal.
 
-All models were tuned via `RandomizedSearchCV` with 3-fold CV, optimizing for PR-AUC.
+### Feature Engineering (34 features from first order only)
 
-| Model | Best Hyperparameters | Test ROC-AUC | Test PR-AUC |
-|---|---|---|---|
-| Logistic Regression | C=1, penalty=l2, solver=saga | 0.5995 | 0.0061 |
-| Random Forest | n_estimators=200, max_depth=3 | 0.6040 | 0.0063 |
-| XGBoost | n_estimators=100, max_depth=6, lr=0.01 | 0.5970 | 0.0066 |
-| **Balanced Random Forest** | **n_estimators=100, max_depth=7, min_samples_leaf=10** | **0.6171** | **0.0077** |
-| LightGBM | n_estimators=100, max_depth=3, lr=0.05, scale_pos_weight=100 | 0.6044 | 0.0073 |
-
-**Selected model:** Balanced Random Forest (best ROC-AUC and tied for best PR-AUC).
-
-![PR and ROC Curves](outputs/pr_roc_curves.png)
-![Model Comparison](outputs/model_comparison.png)
-
-**Primary metric:** PR-AUC, chosen over ROC-AUC because with 0.35% positive rate, ROC-AUC can appear deceptively high while precision remains poor. PR-AUC focuses on the model's ability to identify the rare positive class.
-
-### Stage 2: Order Value (Regression)
-
-Trained on the 234 customers who purchased in the target window. Target was log-transformed (`log(1 + value)`) to handle right skew. Metrics are reported on the original dollar scale after inverse transform.
-
-| Model | Best Hyperparameters | MAE | RMSE |
-|---|---|---|---|
-| Ridge Regression | alpha=100, solver=lsqr | $60.24 | $94.38 |
-| **Random Forest** | **n_estimators=200, max_depth=3, min_samples_leaf=5** | **$55.75** | **$91.80** |
-| XGBoost | n_estimators=100, max_depth=5, lr=0.01 | $55.78 | $92.14 |
-
-**Selected model:** Random Forest Regressor (lowest MAE).
-
-![Predicted vs Actual](outputs/regression_pred_vs_actual.png)
-
-### Top Features (Balanced Random Forest: Propensity)
-
-| Rank | Feature | Importance |
+| Group | Features | Description |
 |---|---|---|
-| 1 | days_since_last_delivered | 0.163 |
-| 2 | days_since_last_purchase | 0.155 |
-| 3 | tot_order_freight_value | 0.103 |
-| 4 | total_payment_value | 0.091 |
-| 5 | tot_pymt_credit_card | 0.062 |
+| Payment behavior | 8 | Value, installments, payment type split, sequential count |
+| Order composition | 4 | Item count, seller count, total freight, total price |
+| Review engagement | 3 | Score, title length, body length |
+| Delivery experience | 3 | Delivery days, estimated days, delivery delta (early vs late) |
+| Purchase context | 3 | Hour of day, day of week, is_delivered |
+| Ratio features | 3 | Freight ratio, price per item, installment per value |
+| Product category | 11 | One-hot encoded (top 10 + other) |
 
-![Feature Importance](outputs/feature_importance.png)
+### Classification Results
 
-Recency features dominate, confirming that how recently a customer interacted is the strongest predictor of repeat purchase. Payment behavior and order value features provide secondary signal.
+| Model | ROC-AUC | PR-AUC | F1 | Precision | Recall |
+|---|---|---|---|---|---|
+| Logistic Regression | 0.6097 | 0.0520 | 0.0933 | 0.0577 | 0.2437 |
+| Random Forest | 0.6268 | 0.0604 | 0.0947 | 0.0609 | 0.2137 |
+| Balanced Random Forest | 0.6274 | 0.0567 | 0.0967 | 0.0537 | 0.4825 |
+| XGBoost | 0.6407 | 0.0902 | 0.1132 | 0.0897 | 0.1536 |
+| **LightGBM** | **0.6412** | **0.0912** | **0.1106** | **0.0920** | **0.1386** |
+
+![Approach 2 PR and ROC Curves](outputs/loyalty_pr_roc_curves.png)
+
+### Regression Results (Future Order Value)
+
+| Model | MAE | RMSE |
+|---|---|---|
+| Ridge | $72.38 | $141.82 |
+| **Random Forest** | **$67.13** | **$136.89** |
+| XGBoost | $68.06 | $139.65 |
+
+### Top Features (LightGBM)
+
+![Approach 2 Feature Importance](outputs/loyalty_feature_importance.png)
+
+Key insights:
+- **Freight ratio** (#1) — shipping cost relative to order value is the strongest loyalty signal
+- **Delivery experience** features are top 5 — late deliveries reduce repeat likelihood
+- **Ratio features** outperform raw values — behavioral intensity matters more than scale
+- **Purchase hour** is predictive — when customers shop correlates with loyalty patterns
+
+---
+
+## Approach Comparison
+
+| Metric | Approach 1 (Propensity) | Approach 2 (Loyalty) |
+|---|---|---|
+| Best PR-AUC | 0.0077 | **0.0912** (12x improvement) |
+| Best ROC-AUC | 0.6171 | **0.6412** |
+| Best classification model | Balanced Random Forest | LightGBM |
+| Regression MAE | **$55.75** | $67.13 |
+| Best regression model | Random Forest | Random Forest |
+| Positive examples | 293 | 2,997 |
+
+**Approach 2 dramatically outperforms on classification** due to 10x more positive examples and richer first-order features (delivery experience, ratio features). **Approach 1 has lower regression MAE** because it predicts on a narrower, more recent time window.
+
+In a production system, both models would be deployed together — Approach 2 identifies WHO is likely loyal at acquisition, Approach 1 tells you WHEN to re-engage them.
 
 ---
 
 ## Inference Pipeline
 
-The inference notebook (`04_inference.ipynb`) scores all 83,748 customers and produces a ranked output:
+Both approaches produce a ranked customer list with:
+- **Propensity/Loyalty score** — probability (0–1) of purchase/repeat
+- **Predicted order value** — expected spend if they convert
+- **Expected value** — score × predicted value — the final ranking metric for ad targeting
 
-- **Propensity score:** 0–1 probability from the Balanced Random Forest
-- **Predicted order value:** Dollar estimate from the Random Forest Regressor
-- **Expected value:** Propensity × predicted value, the ranking metric for ad targeting
+![Approach 1 Score Distributions](outputs/score_distributions.png)
+![Approach 2 Score Distributions](outputs/loyalty_score_distributions.png)
 
-Output is saved to `outputs/customer_scores.csv`.
-
-![Score Distributions](outputs/score_distributions.png)
 ---
 
-## Key Findings
+## Key Takeaways
 
-- **Repeat purchase prediction is inherently difficult** in this dataset. 97% of customers made exactly one purchase, making their feature profiles nearly identical regardless of whether they return. Five different model architectures (linear, bagging, boosting, balanced sampling) all converge to similar performance, confirming the signal ceiling is in the data, not the model.
-- **Recency is the strongest signal.** Days since last delivery and last purchase are the top two features by importance, consistent with established RFM (Recency, Frequency, Monetary) frameworks.
-- **Payment behavior carries meaningful signal.** Total payment value, credit card usage, and installment behavior are top-10 features, how a customer pays reveals their engagement level.
-- **The two-stage propensity × value framework** provides a principled approach to customer ranking even with limited model discrimination, as it combines both likelihood and value into a single actionable score.
+1. **Problem framing matters more than model selection.** Reframing from temporal propensity to loyalty prediction yielded 12x improvement in PR-AUC — no amount of hyperparameter tuning on Approach 1 could match this.
+
+2. **Feature engineering drives performance.** Ratio features (freight_ratio, installment_per_value) and delivery experience features provided the most predictive lift in Approach 2. Raw transactional values alone are insufficient.
+
+3. **Class imbalance is a data problem, not a model problem.** Five different model architectures converged to similar performance in Approach 1. The solution was more positive examples (Approach 2), not more complex models.
+
+4. **Recency and delivery experience are the strongest signals.** Across both approaches, how recently a customer interacted and whether their order was delivered on time are the most important predictors.
 
 ---
 
@@ -150,30 +211,33 @@ Output is saved to `outputs/customer_scores.csv`.
 
 ```
 SCOWTT/
-├── datasets/                              # Raw CSVs (not committed, see setup)
+├── datasets/                              # Raw CSVs (not committed)
 ├── processed/                             # Aggregated modelling datasets
-│   ├── modelling_dataset.csv
-│   └── user_features.csv
+│   ├── modelling_dataset.csv              # Approach 1 features + targets
+│   ├── user_features.csv                  # Approach 1 features only
+│   └── loyalty_modelling_dataset.csv      # Approach 2 features + targets
 ├── notebooks/
-│   ├── 01_data_exploration.ipynb          # Schema, quality checks, profiling reports
-│   ├── 02_feature_engineering.ipynb       # User-level feature construction
-│   ├── 03_modelling.ipynb                 # EDA, model training, evaluation
-│   └── 04_inference.ipynb                 # Score all customers, final output
+│   ├── 01_data_exploration.ipynb          # Schema, quality, profiling
+│   ├── 02A_feature_engineering.ipynb      # Approach 1: temporal features
+│   ├── 02B_feature_engineering.ipynb      # Approach 2: first-order features
+│   ├── 03A_modelling.ipynb               # Approach 1: train + evaluate
+│   ├── 03B_modelling_loyalty.ipynb       # Approach 2: train + evaluate
+│   ├── 04A_inference.ipynb               # Approach 1: score customers
+│   └── 04B_inference_loyalty.ipynb       # Approach 2: score customers
 ├── data_reports/
-│   ├── Feature_Engineering.xlsx           # Feature documentation (4 sheets)
-│   └── *_report.html                     # ydata-profiling reports per source file
+│   ├── Feature_Engineering.xlsx           # Feature documentation
+│   └── *_report.html                     # ydata-profiling reports
 ├── outputs/
-│   ├── best_propensity_model.pkl          # Saved Balanced Random Forest
-│   ├── best_value_model.pkl               # Saved Random Forest Regressor
-│   ├── scaler.pkl                         # StandardScaler (for LR only)
-│   ├── customer_scores.csv                # Final scored output
-│   ├── pr_roc_curves.png                  # PR and ROC curves
-│   ├── model_comparison.png               # Model comparison bar charts
-│   ├── feature_importance.png             # Top 15 feature importances
-│   ├── regression_pred_vs_actual.png      # Predicted vs actual scatter
-│   └── score_distributions.png            # Propensity, value, expected value distributions
-├── pyproject.toml                         # uv project configuration
-├── uv.lock                                # Reproducible dependency lock
+│   ├── best_propensity_model.pkl
+│   ├── best_value_model.pkl
+│   ├── best_loyalty_model.pkl
+│   ├── best_loyalty_value_model.pkl
+│   ├── scaler.pkl
+│   ├── customer_scores.csv               # Approach 1 scored output
+│   ├── loyalty_customer_scores.csv       # Approach 2 scored output
+│   └── *.png                             # All evaluation plots
+├── pyproject.toml
+├── uv.lock
 ├── .gitignore
 └── README.md
 ```
@@ -187,18 +251,19 @@ SCOWTT/
    curl -LsSf https://astral.sh/uv/install.sh | sh
    ```
 
-2. Clone and install dependencies:
+2. Clone and install:
    ```bash
-   git clone https://github.com/ujwal-jibhkate/SCOWTT.git
-   cd SCOWTT
+   git clone https://github.com/ujwal-jibhkate/SCOWTT-Customer-Behavior-Prediction.git
+   cd SCOWTT-Customer-Behavior-Prediction
    uv sync
    ```
 
-3. Place all CSVs in `datasets/`.
+3. Download the [Olist dataset](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce) and place CSVs in `datasets/`.
 
-4. Run notebooks in order:
+4. Run notebooks:
    ```
-   01_data_exploration.ipynb → 02_feature_engineering.ipynb → 03_modelling.ipynb → 04_inference.ipynb
+   Approach 1: 01 → 02A → 03A → 04A
+   Approach 2: 01 → 02B → 03B → 04B
    ```
 
 **Python version:** 3.12.12
@@ -207,18 +272,20 @@ SCOWTT/
 
 ## Future Improvements
 
-- Rolling backtests across multiple monthly snapshots for more robust evaluation
-- Customer × month grain to capture temporal behavioral shifts
-- Status-pivoted payment and review features (payment value by order status, review count by status)
+- Rolling backtests across multiple monthly snapshots
+- Customer x month grain for temporal behavioral shifts
 - SHAP-based feature attribution for model interpretability
-- Calibration of propensity scores using Platt scaling or isotonic regression
-- Delivery experience features (on-time vs late delivery, estimated vs actual delivery gap)
+- Ensemble combining Approach 1 and 2 scores
+- Calibration of propensity scores using Platt scaling
+- Status-pivoted features (payment value by order status)
+- Sentiment analysis on review text using NLP
 
 ---
 
 ## Use of AI Tools
 
-AI tools were used for:
+AI tools (Claude) were used for:
+- Guided learning and conceptual understanding of the data science pipeline
 - Debugging code and resolving library-specific issues
 - Documentation and reporting assistance
 
