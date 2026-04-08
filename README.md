@@ -4,9 +4,9 @@
 
 The assessment asks: *"Predict a user's propensity to place an order and their expected order value."* This can be interpreted two ways:
 
-**Interpretation 1 — Snapshot-based propensity:** Given everything we know about a customer's history up to a point in time, will they purchase in the next 90 days? This is a time-windowed prediction — realistic for production ad targeting where you score customers monthly.
+**Interpretation 1 - Snapshot-based propensity:** Given everything we know about a customer's history up to a point in time, will they purchase in the next 90 days? This is a time-windowed prediction — realistic for production ad targeting where you score customers monthly.
 
-**Interpretation 2 — Loyalty prediction:** Given a customer's very first purchase, will they ever come back? This reframes the problem as identifying repeat buyers at the moment of acquisition — critical for customer lifetime value estimation.
+**Interpretation 2 - Loyalty prediction:** Given a customer's very first purchase, will they ever come back? This reframes the problem as identifying repeat buyers at the moment of acquisition — critical for customer lifetime value estimation.
 
 Both interpretations are valid and complementary. I implemented both as separate pipelines:
 
